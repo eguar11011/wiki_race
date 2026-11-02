@@ -1,0 +1,52 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "mix_task",
+      "request": "launch",
+      "name": "Grafo simple: BFS y DFS",
+      "task": "run",
+      "taskArgs": ["examples/grafo.exs"],
+      "projectDir": "${workspaceFolder}/player"
+    },
+    {
+      "type": "mix_task",
+      "request": "launch",
+      "name": "Kiwix: elegir BFS o DFS",
+      "task": "run",
+      "taskArgs": [
+        "examples/kiwix.exs",
+        "${input:algoritmo}",
+        "${input:inicioUrl}",
+        "${input:objetivoUrl}",
+        "${input:maxVisitados}"
+      ],
+      "projectDir": "${workspaceFolder}/player"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "algoritmo",
+      "type": "pickString",
+      "description": "Algoritmo que quieres seguir paso a paso",
+      "options": ["bfs", "dfs"],
+      "default": "bfs"
+    },
+    {
+      "id": "inicioUrl",
+      "type": "promptString",
+      "description": "URL completa del artículo inicial en tu Kiwix"
+    },
+    {
+      "id": "objetivoUrl",
+      "type": "promptString",
+      "description": "URL completa del artículo objetivo en el mismo Kiwix"
+    },
+    {
+      "id": "maxVisitados",
+      "type": "promptString",
+      "description": "Máximo de páginas por expandir (entero mayor o igual a cero)",
+      "default": "100"
+    }
+  ]
+}
