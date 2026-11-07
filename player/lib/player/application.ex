@@ -1,16 +1,15 @@
 defmodule Player.Application do
   @moduledoc """
-  Starts the application.
-
-  Add your supervisors to `children`. The list starts empty, so no crawler runs until
-  you add one.
+  Supervisa las búsquedas que la plataforma inicia mediante Player.Crawler.
   """
 
   use Application
 
   @impl true
   def start(_type, _args) do
-    children = []
+    children = [
+      {DynamicSupervisor, strategy: :one_for_one, name: Player.CrawlerSupervisor}
+    ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Player.Supervisor)
   end
