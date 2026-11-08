@@ -331,18 +331,13 @@ defmodule Player.CrawlerTest do
 
     assert {:error, _reason} = Crawler.start(nil, "#{base}/Goal")
 
-    for concurrency <- [0, -1, "2", nil] do
-      assert {:error, :max_concurrency_invalida} =
-               Crawler.start(start_url, "#{base}/Goal", max_concurrency: concurrency)
-    end
-
     refute_receive {:http_request, ^server_ref, _path, _server_pid}, 100
   end
 
   defp start_crawler(start_url, target_url, opts \\ []) do
     # Isolate the main traversal to verify its level barrier and worker lifecycle.
-    opts = Keyword.put_new(opts, :explorer_percent, 0)
-    assert {:ok, pid} = Crawler.start(start_url, target_url, opts)
+    opts = Keyword.put_new(opts, :explorer_count, 0)
+    assert {:ok, pid} = Player.SearchHelper.start(start_url, target_url, opts)
     cleanup_crawler(pid)
     pid
   end

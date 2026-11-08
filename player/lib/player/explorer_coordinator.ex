@@ -178,8 +178,7 @@ defmodule Player.ExplorerCoordinator do
 
   defp main_necesita_cupo?(datos) do
     not :queue.is_empty(datos.main.cola) and hay_cupo?(datos) and
-      MapSet.size(datos.main.esperando) <
-        datos.config.max_concurrency - datos.config.explorer_count
+      MapSet.size(datos.main.esperando) < datos.config.bfs_concurrency
   end
 
   defp iniciar_mision(datos, id) do
@@ -199,7 +198,7 @@ defmodule Player.ExplorerCoordinator do
   end
 
   defp siguiente_trabajo(datos) do
-    cupos_main = datos.config.max_concurrency - datos.config.explorer_count
+    cupos_main = datos.config.bfs_concurrency
     cabeza = :queue.peek(datos.main.cola)
 
     cond do

@@ -70,10 +70,10 @@ defmodule Player.ExplorersTest do
     assert {:done, _} = Player.Explorer.next(explorer)
   end
 
-  test "one download slot or a zero explorer percentage preserves BFS and exhaustion" do
+  test "main BFS without explorers preserves its level traversal and exhaustion" do
     for opts <- [
-          [max_concurrency: 1, explorer_percent: 50],
-          [max_concurrency: 3, explorer_percent: 0]
+          [max_concurrency: 1, explorer_count: 0],
+          [max_concurrency: 3, explorer_count: 0]
         ] do
       {base, ref, counts} =
         server(%{
@@ -96,26 +96,6 @@ defmodule Player.ExplorersTest do
     end
   end
 
-  test "invalid explorer settings are rejected before any HTTP request" do
-    {base, ref, _counts} = server(%{})
-    start_url = "#{base}/Start"
-    goal_url = "#{base}/Goal"
-
-    for setting <- [
-          [explorer_percent: -1],
-          [explorer_percent: 100],
-          [explorer_percent: "invalid"],
-          [jump_hops: 0],
-          [explorer_budget: 0],
-          [random_seed: "invalid"]
-        ] do
-      assert {:error, :configuracion_exploradores_invalida} =
-               Crawler.start(start_url, goal_url, setting)
-    end
-
-    refute_receive {:http_request, ^ref, _article, _handler}, 20
-  end
-
   test "the contract start callback uses BFS and explorers with the delivery defaults" do
     variables = ~w(
       PLAYER_MAX_CONCURRENCY PLAYER_EXPLORER_PERCENT PLAYER_JUMP_HOPS
@@ -132,6 +112,7 @@ defmodule Player.ExplorersTest do
 
     assert :sys.get_state(pid).config == %{
              max_concurrency: 32,
+             bfs_concurrency: 8,
              explorer_count: 24,
              jump_hops: 10,
              explorer_budget: 32,
@@ -142,13 +123,13 @@ defmodule Player.ExplorersTest do
     assert %Status{state: :found} = await_state(pid, :found)
   end
 
-  test "the contract start callback reads resource settings from container environment variables" do
+  test "the contract start callback ignores obsolete resource environment variables" do
     variables = %{
-      "PLAYER_MAX_CONCURRENCY" => "2",
-      "PLAYER_EXPLORER_PERCENT" => "50",
-      "PLAYER_JUMP_HOPS" => "5",
-      "PLAYER_EXPLORER_BUDGET" => "32",
-      "PLAYER_RANDOM_SEED" => "17"
+      "PLAYER_MAX_CONCURRENCY" => "invalid",
+      "PLAYER_EXPLORER_PERCENT" => "100",
+      "PLAYER_JUMP_HOPS" => "0",
+      "PLAYER_EXPLORER_BUDGET" => "-1",
+      "PLAYER_RANDOM_SEED" => "invalid"
     }
 
     restore_environment(Map.keys(variables))
@@ -161,11 +142,12 @@ defmodule Player.ExplorersTest do
     assert_receive {:http_request, ^ref, "Start", handler}, 1_000
 
     assert :sys.get_state(pid).config == %{
-             max_concurrency: 2,
-             explorer_count: 1,
-             jump_hops: 5,
+             max_concurrency: 32,
+             bfs_concurrency: 8,
+             explorer_count: 24,
+             jump_hops: 10,
              explorer_budget: 32,
-             random_seed: 17
+             random_seed: nil
            }
 
     send(handler, {:respond, ref})
@@ -177,10 +159,7 @@ defmodule Player.ExplorersTest do
 
     task =
       Task.async(fn ->
-        Crawler.start("#{base}/Start", "#{base}/Goal",
-          max_concurrency: 3,
-          explorer_percent: 34
-        )
+        Crawler.start("#{base}/Start", "#{base}/Goal")
       end)
 
     assert {:ok, pid} = Task.await(task, 500)
@@ -211,7 +190,7 @@ defmodule Player.ExplorersTest do
     }
 
     {base, ref, counts} = server(pages)
-    pid = start_crawler(base, "Missing", max_concurrency: 3, explorer_percent: 34)
+    pid = start_crawler(base, "Missing", max_concurrency: 3, explorer_count: 1)
     assert_receive {:http_request, ^ref, "Start", _}, 1_000
     assert_receive {:http_request, ^ref, first, first_handler}, 1_000
     assert_receive {:http_request, ^ref, second, second_handler}, 1_000
@@ -240,7 +219,7 @@ defmodule Player.ExplorersTest do
         "Shared" => {:sequence, [{503, "Temporary"}, {:wait, links(["Goal"])}]}
       })
 
-    pid = start_crawler(base, "Goal", max_concurrency: 3, explorer_percent: 34)
+    pid = start_crawler(base, "Goal", max_concurrency: 3, explorer_count: 1)
     assert_receive {:http_request, ^ref, "Shared", _}, 1_000
     assert_receive {:http_request, ^ref, "Shared", handler}, 2_000
 
@@ -270,7 +249,7 @@ defmodule Player.ExplorersTest do
 
     # One main slot holds Short. The explorer has the other slot and Long is
     # the only seed that is not already being downloaded.
-    pid = start_crawler(base, "Goal", max_concurrency: 2, explorer_percent: 50)
+    pid = start_crawler(base, "Goal", max_concurrency: 2, explorer_count: 1)
     assert_receive {:http_request, ^ref, "Short", short}, 1_000
     first_path = urls(base, ["Start", "Long", "L2", "L3", "L4", "L5", "Shared", "Goal"])
     assert_receive {:path_found, ^pid, ^first_path}, 2_000
@@ -301,7 +280,7 @@ defmodule Player.ExplorersTest do
         "Deep" => {:wait, links(["Farther"])}
       })
 
-    pid = start_crawler(base, "Goal", max_concurrency: 2, explorer_percent: 50)
+    pid = start_crawler(base, "Goal", max_concurrency: 2, explorer_count: 1)
     assert_receive {:http_request, ^ref, "Short", short}, 1_000
     assert_receive {:http_request, ^ref, "Deep", _deep}, 2_000
     query = Task.async(fn -> Crawler.status(pid) end)
@@ -329,7 +308,7 @@ defmodule Player.ExplorersTest do
         "J1" => {:wait, ""}
       })
 
-    pid = start_crawler(base, "Missing", max_concurrency: 2, explorer_percent: 50)
+    pid = start_crawler(base, "Missing", max_concurrency: 2, explorer_count: 1)
     assert_receive {:http_request, ^ref, "Short", short}, 1_000
     assert_receive {:http_request, ^ref, "X", x}, 2_000
 
@@ -375,7 +354,7 @@ defmodule Player.ExplorersTest do
         "C" => {:wait, links(["C1"])}
       })
 
-    pid = start_crawler(base, "Goal", max_concurrency: 3, explorer_percent: 34)
+    pid = start_crawler(base, "Goal", max_concurrency: 3, explorer_count: 1)
     assert_receive {:http_request, ^ref, "Start", _}, 1_000
     assert_receive {:http_request, ^ref, _article, _handler}, 1_000
     supervisor = Process.whereis(Player.CrawlerSupervisor)
@@ -397,16 +376,8 @@ defmodule Player.ExplorersTest do
   end
 
   defp start_crawler(base, target, opts) do
-    defaults = [
-      max_concurrency: 3,
-      explorer_percent: 34,
-      jump_hops: 5,
-      explorer_budget: 32,
-      random_seed: 17
-    ]
-
     assert {:ok, pid} =
-             Crawler.start("#{base}/Start", "#{base}/#{target}", Keyword.merge(defaults, opts))
+             Player.SearchHelper.start("#{base}/Start", "#{base}/#{target}", opts)
 
     cleanup_crawler(pid)
     pid
