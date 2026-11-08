@@ -41,7 +41,7 @@ defmodule Player.CrawlerTest do
     assert Process.alive?(pid)
   end
 
-  test "BFS reports the shortest path when it discovers the target" do
+  test "the main BFS reports the shortest path when it discovers the target" do
     {base, server_ref} =
       server(%{
         "Start" => links(["A", "A#top", "B"]),
@@ -340,6 +340,8 @@ defmodule Player.CrawlerTest do
   end
 
   defp start_crawler(start_url, target_url, opts \\ []) do
+    # Isolate the main traversal to verify its level barrier and worker lifecycle.
+    opts = Keyword.put_new(opts, :explorer_percent, 0)
     assert {:ok, pid} = Crawler.start(start_url, target_url, opts)
     cleanup_crawler(pid)
     pid

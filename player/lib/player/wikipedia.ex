@@ -1,6 +1,6 @@
 defmodule Player.Wikipedia do
   @moduledoc """
-  Adapta los artículos del Kiwix al grafo que recorren BFS y DFS.
+  Adapta los artículos del Kiwix al grafo del BFS principal y sus exploradores.
 
   Cada URL es un vértice y sus enlaces a artículos son sus vecinos. Los vecinos
   permanecen en el mismo servidor y libro de la página de origen.
