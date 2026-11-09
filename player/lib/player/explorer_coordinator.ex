@@ -362,7 +362,9 @@ defmodule Player.ExplorerCoordinator do
           end
         end)
 
-      semillas = Enum.take(Enum.uniq(Enum.take(vecinos, 256) ++ datos.semillas), @seed_pool_size)
+      semillas =
+        Enum.take(Enum.uniq(Enum.take_random(vecinos, 256) ++ datos.semillas), @seed_pool_size)
+
       %{datos | main: main, semillas: semillas}
     end
   end
