@@ -14,7 +14,7 @@ defmodule Player.ExplorerCoordinator do
   alias Player.{Explorer, StatusStore}
   alias WikiRace.{Harness, Status}
 
-  @work_per_turn 32
+  @work_per_turn 64
   @seed_pool_size 1_024
   @mission_pause_ms 100
 
