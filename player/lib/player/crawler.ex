@@ -36,7 +36,8 @@ defmodule Player.Crawler do
   end
 
   @impl WikiRace.Crawler
-  def status(pid), do: GenServer.call(pid, :status, 200)
+  @doc "Lee el último reporte de ETS sin enviar mensajes al coordinador."
+  def status(pid), do: Player.StatusStore.get(pid)
 
   # El verificador de la plataforma exige al menos un enlace y no permite ciclos.
   defp validar_destino(inicio, inicio), do: {:error, :inicio_igual_al_objetivo}

@@ -6,11 +6,12 @@ defmodule Player.ExplorerCoordinator do
   las aristas descargadas; los padres de cada búsqueda son independientes. Una
   URL pendiente tiene un solo Task y puede servir a varias búsquedas. Todos los
   Tasks están vinculados a este coordinador para terminar con el pid del contrato.
+  El reporte público se publica en ETS para consultarlo sin esperar este buzón.
   """
 
   use GenServer, restart: :temporary
 
-  alias Player.Explorer
+  alias Player.{Explorer, StatusStore}
   alias WikiRace.{Harness, Status}
 
   @work_per_turn 32
@@ -54,12 +55,10 @@ defmodule Player.ExplorerCoordinator do
       despertar: nil
     }
 
+    :ok = StatusStore.register(self(), datos.estado)
     send(self(), :bombear)
     {:ok, datos}
   end
-
-  @impl true
-  def handle_call(:status, _from, datos), do: {:reply, datos.estado, datos}
 
   @impl true
   def handle_info(:bombear, datos) do
@@ -91,7 +90,7 @@ defmodule Player.ExplorerCoordinator do
 
   def handle_info({:EXIT, _pid, _razon}, datos), do: {:noreply, datos}
 
-  # El presupuesto por mensaje permite atender status incluso si muchos de los
+  # El presupuesto por mensaje permite atender otros mensajes incluso si muchos de los
   # siguientes artículos ya están en caché y no requieren esperar una descarga.
   defp bombear(datos), do: bombear(datos, @work_per_turn)
   defp bombear(%{terminado: true} = datos, _restantes), do: datos
@@ -370,8 +369,10 @@ defmodule Player.ExplorerCoordinator do
 
   defp registrar_camino(datos, camino) do
     if datos.estado.path == [] or length(camino) < length(datos.estado.path) do
+      estado = %{datos.estado | path: camino, state: :found}
+      :ok = StatusStore.publish(self(), estado)
       Harness.report(camino)
-      %{datos | estado: %{datos.estado | path: camino, state: :found}}
+      %{datos | estado: estado}
     else
       datos
     end
@@ -405,9 +406,11 @@ defmodule Player.ExplorerCoordinator do
   defp terminar(datos) do
     Enum.each(datos.tareas, fn {ref, trabajo} -> cancelar(ref, trabajo) end)
     if datos.despertar, do: Process.cancel_timer(datos.despertar)
-    if datos.estado.path == [], do: Harness.report_exhausted()
-    estado = if datos.estado.path == [], do: :exhausted, else: :found
     :ets.delete_all_objects(datos.cache)
+    estado_final = if datos.estado.path == [], do: :exhausted, else: :found
+    estado = %{datos.estado | state: estado_final, frontier_size: 0}
+    :ok = StatusStore.publish(self(), estado)
+    if datos.estado.path == [], do: Harness.report_exhausted()
 
     %{
       datos
@@ -425,7 +428,7 @@ defmodule Player.ExplorerCoordinator do
         exploradores: %{},
         semillas: [],
         despertar: nil,
-        estado: %{datos.estado | state: estado, frontier_size: 0}
+        estado: estado
     }
   end
 
@@ -449,7 +452,9 @@ defmodule Player.ExplorerCoordinator do
         [] -> datos.estado.current_url
       end
 
-    %{datos | estado: %{datos.estado | frontier_size: frontera, current_url: actual}}
+    estado = %{datos.estado | frontier_size: frontera, current_url: actual}
+    :ok = StatusStore.publish(self(), estado)
+    %{datos | estado: estado}
   end
 
   defp programar_despertar(%{despertar: ref} = datos) when not is_nil(ref), do: datos

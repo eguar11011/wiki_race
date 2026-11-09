@@ -20,6 +20,8 @@ defmodule Player.CrawlerTest do
     start_task = Task.async(fn -> Crawler.start(start_url, target_url) end)
     assert {:ok, pid} = Task.await(start_task, 500)
     cleanup_crawler(pid)
+    assert %Status{state: :running, visited_count: 0, path: []} = Crawler.status(pid)
+    assert :ets.member(Player.StatusStore, pid)
 
     assert Enum.any?(DynamicSupervisor.which_children(Player.CrawlerSupervisor), fn
              {_id, child, _type, _modules} -> child == pid
@@ -27,18 +29,70 @@ defmodule Player.CrawlerTest do
 
     assert_receive {:http_request, ^server_ref, "/content/wiki/Start", server_pid}, 1_000
 
-    status_task = Task.async(fn -> Crawler.status(pid) end)
+    # Even a suspended coordinator must not delay a snapshot read or receive a call.
+    :ok = :sys.suspend(pid)
 
-    assert %Status{
-             current_url: ^start_url,
-             visited_count: 0,
-             state: :running,
-             path: []
-           } = Task.await(status_task, 200)
+    try do
+      status_task = Task.async(fn -> Crawler.status(pid) end)
+
+      assert %Status{
+               current_url: ^start_url,
+               visited_count: 0,
+               state: :running,
+               path: []
+             } = Task.await(status_task, 100)
+
+      assert {:messages, messages} = Process.info(pid, :messages)
+      refute Enum.any?(messages, &match?({:"$gen_call", _, :status}, &1))
+    after
+      :ok = :sys.resume(pid)
+    end
 
     send(server_pid, {:respond, server_ref})
     assert %Status{state: :found, path: [^start_url, ^target_url]} = await_state(pid, :found)
     assert Process.alive?(pid)
+  end
+
+  test "ETS snapshots are isolated by crawler pid and removed only when that crawler exits" do
+    {base, server_ref} =
+      server(%{
+        "First" => {:wait, links(["Goal"])},
+        "Second" => {:wait, links(["Goal"])}
+      })
+
+    first_url = "#{base}/First"
+    second_url = "#{base}/Second"
+    target_url = "#{base}/Goal"
+    first = start_crawler(first_url, target_url)
+    second = start_crawler(second_url, target_url)
+
+    assert_receive {:http_request, ^server_ref, "/content/wiki/First", _first_handler}, 1_000
+    assert_receive {:http_request, ^server_ref, "/content/wiki/Second", second_handler}, 1_000
+    assert %Status{current_url: ^first_url, state: :running} = Crawler.status(first)
+    assert %Status{current_url: ^second_url, state: :running} = Crawler.status(second)
+
+    first_ref = Process.monitor(first)
+    Process.exit(first, :kill)
+    assert_receive {:DOWN, ^first_ref, :process, ^first, :killed}, 1_000
+    await_snapshot_removed(first)
+    assert %Status{current_url: ^second_url, state: :running} = Crawler.status(second)
+
+    send(second_handler, {:respond, server_ref})
+
+    assert %Status{state: :found, path: [^second_url, ^target_url]} =
+             await_state(second, :found)
+
+    # The result remains available while the finished coordinator is alive.
+    assert Process.alive?(second)
+    assert :ets.member(Player.StatusStore, second)
+
+    assert [{^second, %Status{state: :found, path: [^second_url, ^target_url]}}] =
+             :ets.lookup(Player.StatusStore, second)
+
+    second_ref = Process.monitor(second)
+    Process.exit(second, :kill)
+    assert_receive {:DOWN, ^second_ref, :process, ^second, :killed}, 1_000
+    await_snapshot_removed(second)
   end
 
   test "the main BFS reports the shortest path when it discovers the target" do
@@ -387,6 +441,20 @@ defmodule Player.CrawlerTest do
       true ->
         Process.sleep(10)
         await_state(pid, expected, deadline)
+    end
+  end
+
+  defp await_snapshot_removed(pid, attempts \\ 100) do
+    cond do
+      not :ets.member(Player.StatusStore, pid) ->
+        :ok
+
+      attempts == 0 ->
+        flunk("Snapshot remained in ETS after crawler #{inspect(pid)} exited")
+
+      true ->
+        Process.sleep(5)
+        await_snapshot_removed(pid, attempts - 1)
     end
   end
 

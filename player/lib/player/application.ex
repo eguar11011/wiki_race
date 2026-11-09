@@ -8,9 +8,11 @@ defmodule Player.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      Player.StatusStore,
       {DynamicSupervisor, strategy: :one_for_one, name: Player.CrawlerSupervisor}
     ]
 
-    Supervisor.start_link(children, strategy: :one_for_one, name: Player.Supervisor)
+    # Si desaparece la tabla, también se detienen las búsquedas que la utilizaban.
+    Supervisor.start_link(children, strategy: :rest_for_one, name: Player.Supervisor)
   end
 end
