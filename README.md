@@ -1,6 +1,6 @@
 # Player
 
-Grupo: WikiExploradores
+Grupo: Exploradores
 
 This folder is your starting point. It is an OTP application that compiles,
 connects to the platform node, and declares the `WikiRace.Crawler` behavior,
