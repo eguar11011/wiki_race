@@ -4,6 +4,21 @@
 #   KIWIX_BASE=http://kiwix1:8080 mix run ../experiments/reciprocity/e4_runner.exs salida.csv
 #
 # ESTADO: no se ha ejecutado nunca. Ver e4-summary.md.
+#
+# Una fila por ejecución. La columna `outcome` separa observaciones válidas de las demás:
+#
+#   found, exhausted  observación válida: la carrera terminó y sus métricas están completas.
+#                     `exhausted` es agotamiento real de la frontera (end_reason de la Race).
+#   resource_limit    censurada: un límite de recursos rechazó enlaces. Métricas completas.
+#   deadline          censurada por el plazo propio de la Race (solo si se configura).
+#   timeout           censurada por presupuesto: sin estado terminal dentro de E4_LIMIT_MS.
+#                     No es un fallo de infraestructura. Métricas vacías.
+#   no_workers        fallo: murieron todos los workers. Métricas completas.
+#   stats_missing     fallo: estado terminal sin resumen (o sin end_reason coherente).
+#   race_unreachable  fallo: la carrera no respondió a la sincronización. Métricas vacías.
+#
+# `error` lleva el motivo de stats_missing y race_unreachable. Las métricas vacías nunca son
+# ceros: solo las filas found/exhausted se analizan como observaciones.
 
 [output] = System.argv()
 base = System.get_env("KIWIX_BASE", "http://kiwix1:8080")
@@ -35,6 +50,39 @@ wait = fn wait, pid, deadline ->
   end
 end
 
+# Sincronización explícita. Race publica el resumen antes del estado terminal, y
+# :sys.get_state/1 vuelve cuando la Race ha procesado todos sus mensajes previos
+# (finish/3 incluido), así que tras él el resumen existe o falta de verdad.
+collect = fn pid, status ->
+  if status.state in [:found, :exhausted] do
+    try do
+      _ = :sys.get_state(pid)
+
+      case Player.Crawler.stats(pid) do
+        nil ->
+          {:stats_missing, "Crawler.stats/1 devolvió nil con estado #{status.state}", nil}
+
+        %{end_reason: :found} = metrics when status.state == :found ->
+          {:found, "", metrics}
+
+        %{end_reason: reason} = metrics
+        when status.state == :exhausted and reason in [:exhausted, :resource_limit, :deadline, :no_workers] ->
+          {reason, "", metrics}
+
+        metrics ->
+          {:stats_missing, "end_reason #{inspect(metrics[:end_reason])} incoherente con estado #{status.state}", nil}
+      end
+    catch
+      :exit, reason -> {:race_unreachable, "sys.get_state: #{inspect(reason)}", nil}
+    end
+  else
+    {:timeout, "", nil}
+  end
+end
+
+# El motivo puede contener comas o comillas.
+csv_text = fn text -> ~s(") <> String.replace(text, ~s("), ~s("")) <> ~s(") end
+
 fields = ~w(pages errors duplicates download_us discovered memory_max first_path_ms path_length
             encounters candidates_checked candidates_confirmed)a
 
@@ -46,26 +94,43 @@ runs =
   end
   |> Enum.shuffle()
 
-header = ["source", "target", "policy", "repetition", "state", "path_articles"] ++ Enum.map(fields, &Atom.to_string/1)
+header =
+  ["source", "target", "policy", "repetition", "outcome", "error", "state", "path_articles"] ++
+    Enum.map(fields, &Atom.to_string/1)
+
 File.write!(output, Enum.join(header, ",") <> "\n")
 
-for {source, target, policy, repetition} <- runs do
-  {:ok, pid} = Player.Crawler.start(article.(source), article.(target), strategy: policy)
-  status = wait.(wait, pid, System.monotonic_time(:millisecond) + limit_ms)
-  Process.sleep(10)
-  metrics = Player.Crawler.stats(pid) || %{}
-  ref = Process.monitor(pid)
-  Process.exit(pid, :kill)
+failures =
+  Enum.reduce(runs, 0, fn {source, target, policy, repetition}, failures ->
+    {:ok, pid} = Player.Crawler.start(article.(source), article.(target), strategy: policy)
+    status = wait.(wait, pid, System.monotonic_time(:millisecond) + limit_ms)
+    {outcome, error, metrics} = collect.(pid, status)
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
 
-  receive do
-    {:DOWN, ^ref, _, _, _} -> :ok
-  after
-    5_000 -> :ok
-  end
+    receive do
+      {:DOWN, ^ref, _, _, _} -> :ok
+    after
+      5_000 -> :ok
+    end
 
-  row =
-    [source, target, inspect(policy), repetition, status.state, length(status.path)] ++
-      Enum.map(fields, &Map.get(metrics, &1, ""))
+    values = if metrics, do: Enum.map(fields, &Map.fetch!(metrics, &1)), else: Enum.map(fields, fn _ -> "" end)
 
-  File.write!(output, Enum.join(row, ",") <> "\n", [:append])
+    row =
+      [source, target, inspect(policy), repetition, outcome, csv_text.(error), status.state, length(status.path)] ++
+        values
+
+    File.write!(output, Enum.join(row, ",") <> "\n", [:append])
+
+    if outcome in [:stats_missing, :race_unreachable, :no_workers] do
+      IO.puts(:stderr, "E4 ERROR #{source} -> #{target} #{inspect(policy)} rep #{repetition}: #{outcome}: #{error}")
+      failures + 1
+    else
+      failures
+    end
+  end)
+
+if failures > 0 do
+  IO.puts(:stderr, "E4: #{failures} ejecuciones con fallo de infraestructura (ver columna outcome)")
+  System.halt(1)
 end
