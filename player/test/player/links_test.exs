@@ -34,7 +34,9 @@ defmodule Player.LinksTest do
     {"#top", nil},
     {"javascript:x()", nil},
     {"mailto:a@b.c", nil},
-    {"%zz", nil}
+    # URI.decode/1 (Elixir 1.20.5) deja intacto un escape inválido: no lanza y el
+    # enlace se conserva, igual que en el verificador.
+    {"%zz", @book <> "%zz"}
   ]
 
   test "resolución y forma canónica esperadas" do
@@ -71,7 +73,7 @@ defmodule Player.LinksTest do
   # Detección de divergencias con la copia literal del verificador en casos cuya
   # salida depende de Mochiweb o de URI.merge y no se ha fijado a mano.
   test "casos límite coinciden con la copia del verificador" do
-    hrefs = ["", " Foo", "Foo ", "a b", "Foo&amp;Bar", "Star_Wars:_X", "File:X.png", "tel:1", "?q"]
+    hrefs = ["", " Foo", "Foo ", "a b", "Foo&amp;Bar", "Star_Wars:_X", "File:X.png", "tel:1", "?q", "%zz"]
 
     for href <- hrefs do
       {:ok, links} = Links.extract(page([href]), @base)

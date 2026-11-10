@@ -30,8 +30,9 @@ defmodule Player.Race do
     max_discovered: 250_000,
     memory_limit: 400 * 1024 * 1024,
     memory_check_ms: 250,
-    # El harness solo espera 5 s a las verificaciones pendientes al terminar.
-    deadline_ms: 114_000,
+    # Sin plazo propio: la plataforma limita la carrera y mata el pid. Solo los
+    # tests o un banco aislado lo fijan; al vencer, la causa es `:deadline`.
+    deadline_ms: nil,
     max_replacements: 64,
     reverse: [],
     req_options: []
@@ -60,8 +61,9 @@ defmodule Player.Race do
           race: self(),
           seen: seen,
           goals: goals,
-          # Control de recursos, separado de las estadísticas: 1 = descubiertos, 2 = memoria excedida.
-          limits: :atomics.new(2, []),
+          # Control de recursos, separado de las estadísticas: 1 = descubiertos,
+          # 2 = memoria excedida, 3 = algún límite rechazó un enlace (no se reinicia).
+          limits: :atomics.new(3, []),
           stats: Stats.new(),
           prefix: prefix,
           target_canon: target_canon,
@@ -89,6 +91,11 @@ defmodule Player.Race do
           started_at: System.monotonic_time(:millisecond)
         }
 
+        Logger.info(
+          "wikirace_reciprocity event=race_start race=#{inspect(self())} " <>
+            "strategy=#{config.strategy} start=#{start_url} target=#{target_url}"
+        )
+
         {:ok, state, {:continue, :start}}
 
       :error ->
@@ -102,7 +109,7 @@ defmodule Player.Race do
   @impl true
   def handle_continue(:start, state) do
     Process.send_after(self(), :check_memory, state.config.memory_check_ms)
-    Process.send_after(self(), :deadline, state.config.deadline_ms)
+    if state.config.deadline_ms, do: Process.send_after(self(), :deadline, state.config.deadline_ms)
     state = Enum.reduce(1..state.config.concurrency, state, fn _n, acc -> add_worker(acc) end)
     {:noreply, step(state)}
   end
@@ -137,7 +144,8 @@ defmodule Player.Race do
     {:noreply, %{state | memory_max: max(state.memory_max, total)}}
   end
 
-  def handle_info(:deadline, %{done: false} = state), do: {:noreply, finish(state, :exhausted, [])}
+  def handle_info(:deadline, %{done: false} = state),
+    do: {:noreply, finish(state, :exhausted, [], :deadline)}
   def handle_info(_message, state), do: {:noreply, state}
 
   defp apply_result(state, job, {:error, _reason}) do
@@ -180,7 +188,7 @@ defmodule Player.Race do
 
     with {:ok, path} <- Route.build(state.context.seen, page, suffix),
          :ok <- Route.validate(path, state.start_url, state.target_url) do
-      finish(state, :found, path)
+      finish(state, :found, path, :found)
     else
       {:error, reason} ->
         Logger.warning("Camino descartado: #{inspect(reason)}")
@@ -233,9 +241,20 @@ defmodule Player.Race do
 
   # Tras repartir, nada en curso significa que no queda trabajo (o que no quedan workers).
   defp maybe_exhausted(%{done: false, active: active} = state) when map_size(active) == 0,
-    do: finish(state, :exhausted, [])
+    do: finish(state, :exhausted, [], exhausted_cause(state))
 
   defp maybe_exhausted(state), do: state
+
+  # Si quedaran workers libres y trabajo, `dispatch` ya lo habría repartido: sin workers,
+  # la frontera puede no estar vacía. Si un límite rechazó enlaces, la exploración quedó
+  # incompleta. Solo en otro caso la frontera se agotó de verdad.
+  defp exhausted_cause(state) do
+    cond do
+      map_size(state.workers) == 0 -> :no_workers
+      :atomics.get(state.context.limits, 3) == 1 -> :resource_limit
+      true -> :exhausted
+    end
+  end
 
   defp publish(%{done: true} = state), do: state
 
@@ -255,8 +274,20 @@ defmodule Player.Race do
 
   defp replace_worker(state), do: state
 
-  defp finish(state, outcome, path) do
+  # Orden de publicación: resumen, estado terminal y reporte. Quien reciba el reporte o
+  # vea `:found`/`:exhausted` en `status/1` ya puede leer `stats/1`.
+  #
+  # Corte de las métricas: el resumen es una foto de los contadores en el momento en
+  # que se decide terminar, antes de matar los Fetchers. Lo que hagan los Fetchers en
+  # curso durante la limpieza (descargas, enlaces reclamados) no entra en el resumen.
+  #
+  # `cause` (:found, :exhausted, :deadline, :no_workers o :resource_limit) solo va al
+  # resumen y al log: `status/1` y el harness siguen con :found o :exhausted.
+  defp finish(state, outcome, path, cause) do
     record_path(state, path)
+    summary = summary(state, cause)
+    StatusTable.publish_stats(self(), summary)
+    log_end(state, summary)
     status = %{state.status | state: outcome, path: path, frontier_size: 0}
     # `status/1` debe mostrar el camino antes de que llegue el reporte.
     StatusTable.publish(self(), status)
@@ -279,7 +310,6 @@ defmodule Player.Race do
         frontier: Frontier.new()
     }
 
-    StatusTable.publish_stats(self(), summary(state))
     state
   end
 
@@ -293,11 +323,23 @@ defmodule Player.Race do
   defp report(:found, path), do: Harness.report(path)
   defp report(:exhausted, _path), do: Harness.report_exhausted()
 
-  defp summary(state) do
+  defp log_end(state, summary) do
+    elapsed = System.monotonic_time(:millisecond) - state.started_at
+
+    Logger.info(
+      "wikirace_reciprocity event=race_end race=#{inspect(self())} cause=#{summary.end_reason} " <>
+        "elapsed_ms=#{elapsed} pages=#{summary.pages} visited=#{state.status.visited_count} " <>
+        "discovered=#{summary.discovered} errors=#{summary.errors} memory_max=#{summary.memory_max} " <>
+        "path_length=#{summary.path_length}"
+    )
+  end
+
+  defp summary(state, cause) do
     state.context.stats
     |> Stats.snapshot()
     |> Map.merge(%{
       strategy: state.config.strategy,
+      end_reason: cause,
       discovered: :atomics.get(state.context.limits, 1),
       memory_max: state.memory_max
     })

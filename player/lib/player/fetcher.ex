@@ -81,6 +81,8 @@ defmodule Player.Fetcher do
         []
 
       not room?(context) ->
+        # Solo registra que un límite dejó la exploración incompleta (causa :resource_limit).
+        :atomics.put(context.limits, 3, 1)
         []
 
       :ets.insert_new(context.seen, {canon, url, parent.canon, parent.depth + 1}) ->

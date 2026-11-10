@@ -68,6 +68,7 @@ defmodule Player.RaceTest do
       pid = race(%{"S" => ["A", "T"], "A" => []})
       assert_receive {:path_found, ^pid, path}, 2_000
       assert path == [url("S"), url("T")]
+      assert Crawler.stats(pid).end_reason == :found
     end
 
     test "dos y tres saltos, válidos para el verificador" do
@@ -89,6 +90,7 @@ defmodule Player.RaceTest do
       pid = race(%{"S" => ["A"], "A" => ["B", "S"], "B" => ["A", "S"]})
       assert_receive {:exhausted, ^pid}, 2_000
       assert Crawler.status(pid).state == :exhausted
+      assert Crawler.stats(pid).end_reason == :exhausted
       assert stats(pid).duplicates > 0
       refute_received {:path_found, _, _}
     end
@@ -195,6 +197,7 @@ defmodule Player.RaceTest do
       hook = fn _address -> raise "fallo" end
       pid = race(%{"S" => ["T"]}, [concurrency: 1, max_replacements: 0], hook)
       assert_receive {:exhausted, ^pid}, 2_000
+      assert Crawler.stats(pid).end_reason == :no_workers
     end
 
     test "un error HTTP se omite" do
@@ -222,6 +225,7 @@ defmodule Player.RaceTest do
       pid = race(links |> Map.new(&{&1, []}) |> Map.put("S", links), max_discovered: 10, concurrency: 2)
       assert_receive {:exhausted, ^pid}, 5_000
       assert Crawler.stats(pid).discovered == 10
+      assert Crawler.stats(pid).end_reason == :resource_limit
     end
 
     test "el límite de memoria detiene el descubrimiento" do
@@ -230,6 +234,20 @@ defmodule Player.RaceTest do
       pid = race(pages, [memory_limit: 1, memory_check_ms: 1], fn _ -> Process.sleep(30) end)
       assert_receive {:exhausted, ^pid}, 5_000
       assert Crawler.stats(pid).discovered == 0
+      assert Crawler.stats(pid).end_reason == :resource_limit
+    end
+
+    test "sin plazo propio por defecto: la plataforma limita la carrera" do
+      pid = race(%{"S" => ["T"]}, [], fn _ -> Process.sleep(200) end)
+      assert :sys.get_state(pid).config.deadline_ms == nil
+    end
+
+    test "un plazo configurado termina como :exhausted con causa :deadline" do
+      pid = race(%{"S" => ["A"], "A" => ["T"]}, [deadline_ms: 50], fn _ -> Process.sleep(1_000) end)
+      assert_receive {:exhausted, ^pid}, 2_000
+      assert Crawler.status(pid).state == :exhausted
+      assert Crawler.stats(pid).end_reason == :deadline
+      refute_received {:path_found, _, _}
     end
 
     test "al terminar vacía la tabla y publica el resumen" do
