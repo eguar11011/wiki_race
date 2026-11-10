@@ -14,3 +14,10 @@
 /deploy/final/final.env
 /deploy/final/groups.txt
 /deploy/final/groups/
+
+/_build/
+/deps/
+/.elixir_ls/
+/.fetch
+erl_crash.dump
+*.ez
